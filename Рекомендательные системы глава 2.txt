@@ -1,0 +1,320 @@
+
+# %matplotlib inline
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+from ast import literal_eval
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.metrics.pairwise import linear_kernel, cosine_similarity
+from nltk.stem.snowball import SnowballStemmer
+from nltk.stem.wordnet import WordNetLemmatizer
+from nltk.corpus import wordnet
+from surprise import Reader, Dataset, SVD
+from surprise.model_selection import cross_validate
+import csv
+#from surprise import evaluate
+
+import warnings; warnings.simplefilter('ignore')
+
+md = pd. read_csv('E:/movies_metadata.csv')
+md.head()
+
+md['genres'] = md['genres'].fillna('[]').apply(literal_eval).apply(lambda x: [i['name'] for i in x] if isinstance(x, list) else [])
+
+coutns_vote = md[md['vote_count'].notnull()]['vote_count'].astype('int')
+vote_averages = md[md['vote_average'].notnull()]['vote_average'].astype('int')
+C = vote_averages.mean()
+m = coutns_vote.quantile(0.95)
+
+md['year'] = pd.to_datetime(md['release_date'], errors='coerce').apply(lambda x: str(x).split('-')[0] if x != np.nan else np.nan)
+
+satisfy_percentile = md[(md['vote_count'] >= m) & (md['vote_count'].notnull()) & (md['vote_average'].notnull())][['title', 'year', 'vote_count', 'vote_average', 'popularity', 'genres']]
+satisfy_percentile['vote_count'] = satisfy_percentile['vote_count'].astype('int')
+satisfy_percentile['vote_average'] = satisfy_percentile['vote_average'].astype('int')
+print(satisfy_percentile.shape)
+
+def weighted_rating(x):
+    v = x['vote_count']
+    R = x['vote_average']
+    return (v/(v+m) * R) + (m/(m+v) * C)
+
+satisfy_percentile['wr'] = satisfy_percentile.apply(weighted_rating, axis=1)
+satisfy_percentile = satisfy_percentile.sort_values('wr', ascending=False).head(250)
+
+#print(satisfy_percentile.head(10))
+
+genre = md.apply(lambda x: pd.Series(x['genres']),axis=1).stack().reset_index(level=1, drop=True)
+genre.name = 'genre'
+gen_md = md.drop('genres', axis=1).join(genre)
+
+
+def build_chart_certain_gerne(genre, percentile=0.95):
+    certain_genre_film = gen_md[gen_md['genre'] == genre]
+    counts_vote = certain_genre_film[certain_genre_film['vote_count']
+        .notnull()]['vote_count']\
+        .astype('int')
+    vote_averages = certain_genre_film[certain_genre_film['vote_average']
+        .notnull()]['vote_average']\
+        .astype('int')
+    C = vote_averages.mean()
+    m = counts_vote.quantile(percentile)
+
+    satisfy_percentile = certain_genre_film[(certain_genre_film['vote_count']>m)
+                                   & (certain_genre_film['vote_count']
+                                      .notnull())
+                                   & (certain_genre_film['vote_average']
+                                      .notnull())][
+        ['title', 'year', 'vote_count', 'vote_average', 'popularity']]
+
+    satisfy_percentile['vote_count'] = satisfy_percentile['vote_count']\
+        .astype('int')
+    satisfy_percentile['vote_average'] = satisfy_percentile['vote_average']\
+        .astype('int')
+
+    satisfy_percentile['wr'] = satisfy_percentile.apply(
+        lambda x: (x['vote_count'] / (x['vote_count'] + m)
+                   * x['vote_average']) + (m / (m + x['vote_count']) * C),
+        axis=1)
+    satisfy_percentile = satisfy_percentile\
+        .sort_values('wr', ascending=False).head(250)
+
+    return satisfy_percentile
+
+d = md.drop('genres', axis=1).join(genre)
+
+
+def build_chart(genre, percentile=0.95):
+    df = gen_md[gen_md['genre'] == genre]
+    vote_counts = df[df['vote_count'].notnull()]['vote_count'].astype('int')
+    vote_averages = df[df['vote_average'].notnull()]['vote_average'].astype('int')
+    C = vote_averages.mean()
+    m = vote_counts.quantile(percentile)
+
+    qualified = df[(df['vote_count'] >= m) & (df['vote_count'].notnull()) & (df['vote_average'].notnull())][
+        ['title', 'year', 'vote_count', 'vote_average', 'popularity']]
+    qualified['vote_count'] = qualified['vote_count'].astype('int')
+    qualified['vote_average'] = qualified['vote_average'].astype('int')
+
+    qualified['wr'] = qualified.apply(
+        lambda x: (x['vote_count'] / (x['vote_count'] + m) * x['vote_average']) + (m / (m + x['vote_count']) * C),
+        axis=1)
+    qualified = qualified.sort_values('wr', ascending=False).head(250)
+
+    return qualified
+
+pd.set_option('display.max_columns', 10)
+
+#print(build_chart_certain_gerne('Comedy').head(10))
+
+links_small = pd.read_csv('E:/Bsu/course42/Diploma/Kurs/links_small.csv')
+links_small = links_small[links_small['tmdbId'].notnull()]['tmdbId'].astype('int')
+
+md = md.drop([19730, 29503, 35587])
+md['id'] = md['id'].astype('int')
+content_md = md[md['id'].isin(links_small)]
+content_md.shape
+
+content_md['tagline'] = content_md['tagline'].fillna('')
+content_md['description'] = content_md['overview'] \
+                            + content_md['tagline']
+content_md['description'] = content_md['description'].fillna('')
+
+tf_idf = TfidfVectorizer(analyzer='word',ngram_range=(1, 2)
+                         ,min_df=0, stop_words='english')
+tfidf_matrix = tf_idf.fit_transform(content_md['description'])
+print(tfidf_matrix.shape)
+
+cosine_sim = linear_kernel(tfidf_matrix, tfidf_matrix)
+#print(cosine_sim[0])
+
+content_md = content_md.reset_index()
+titles = content_md['title']
+indices = pd.Series(content_md.index, index=content_md['title'])
+
+def get_recommendations_title_film(title):
+    idx = indices[title]
+    sim_scores = list(enumerate(cosine_sim[idx]))
+    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+    sim_scores = sim_scores[1:31]
+    movie_indices = [i[0] for i in sim_scores]
+    return titles.iloc[movie_indices]
+
+#print(get_recommendations_title_film('The Dark Knight').head(10))
+
+
+#Metadata Based Recommender
+credits = pd.read_csv('E:/Bsu/course42/Diploma/Kurs/credits.csv')
+keywords = pd.read_csv('E:/Bsu/course42/Diploma/Kurs/keywords.csv')
+
+keywords['id'] = keywords['id'].astype('int')
+credits['id'] = credits['id'].astype('int')
+md['id'] = md['id'].astype('int')
+md.shape
+
+md = md.merge(credits, on='id')
+md = md.merge(keywords, on='id')
+
+all_content_md = md[md['id'].isin(links_small)]
+all_content_md.shape
+
+all_content_md['cast'] = all_content_md['cast'].apply(literal_eval)
+all_content_md['crew'] = all_content_md['crew'].apply(literal_eval)
+all_content_md['keywords'] = all_content_md['keywords'].apply(literal_eval)
+all_content_md['cast_size'] = all_content_md['cast'].apply(lambda x: len(x))
+all_content_md['crew_size'] = all_content_md['crew'].apply(lambda x: len(x))
+
+def get_director(x):
+    for i in x:
+        if i['job'] == 'Director':
+            return i['name']
+    return np.nan
+
+all_content_md['director'] = all_content_md['crew'].apply(get_director)
+
+all_content_md['cast'] = all_content_md['cast']\
+    .apply(lambda x: [i['name'] for i in x] if isinstance(x, list) else [])
+all_content_md['cast'] = all_content_md['cast']\
+    .apply(lambda x: x[:3] if len(x) >=3 else x)
+all_content_md['keywords'] = all_content_md['keywords']\
+    .apply(lambda x: [i['name'] for i in x] if isinstance(x, list) else [])
+
+all_content_md['cast'] = all_content_md['cast'].apply(lambda x: [str.lower(i.replace(" ", "")) for i in x])
+
+all_content_md['director'] = all_content_md['director'].astype('str').apply(lambda x: str.lower(x.replace(" ", "")))
+all_content_md['director'] = all_content_md['director'].apply(lambda x: [x,x, x])
+
+s = all_content_md.apply(lambda x: pd.Series(x['keywords']),axis=1).stack().reset_index(level=1, drop=True)
+s.name = 'keyword'
+
+s = s.value_counts()
+#print(s[:5])
+
+s = s[s > 5]
+
+st = SnowballStemmer('english')
+st.stem('dogs')
+
+def keywords_filter(x):
+    words = []
+    for i in x:
+        if i in s:
+            words.append(i)
+    return words
+
+all_content_md['keywords'] = all_content_md['keywords']\
+    .apply(keywords_filter)
+all_content_md['keywords'] = all_content_md['keywords']\
+    .apply(lambda x: [st.stem(i) for i in x])
+all_content_md['keywords'] = all_content_md['keywords']\
+    .apply(lambda x: [str.lower(i.replace(" ", "")) for i in x])
+
+all_content_md['soup'] = all_content_md['keywords'] \
+                         + all_content_md['cast'] \
+                         + all_content_md['director'] \
+                         + all_content_md['genres']
+all_content_md['soup'] = all_content_md['soup']\
+    .apply(lambda x: ' '.join(x))
+
+countVectorizerValue = CountVectorizer(analyzer='word',ngram_range=(1, 2),
+                        min_df=0, stop_words='english')
+count_matrix = countVectorizerValue.fit_transform(all_content_md['soup'])
+
+cosine_sim = cosine_similarity(count_matrix, count_matrix)
+
+all_content_md = all_content_md.reset_index()
+titles = all_content_md['title']
+indices = pd.Series(all_content_md.index, index=all_content_md['title'])
+
+#print(get_recommendations_title_film('The Dark Knight').head(10))
+#print(get_recommendations('Mean Girls').head(10))
+
+
+def improved_recommendations_title_film(title):
+    idx = indices[title]
+    sim_scores = list(enumerate(cosine_sim[idx]))
+    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+    sim_scores = sim_scores[1:51]
+    movie_indices = [i[0] for i in sim_scores]
+
+    movies = all_content_md.iloc[movie_indices][['title',
+                                                 'vote_count',
+                                                 'vote_average',
+                                                 'year']]
+    counts_vote = movies[movies['vote_count']
+        .notnull()]['vote_count'].astype('int')
+    vote_averages = movies[movies['vote_average']
+        .notnull()]['vote_average'].astype('int')
+    C = vote_averages.mean()
+    m = counts_vote.quantile(0.50)
+    good_rating_movies = movies[
+        (movies['vote_count'] >= m) & (movies['vote_count']
+                                       .notnull()) & (movies['vote_average'].notnull())]
+    good_rating_movies['vote_count'] = good_rating_movies['vote_count']\
+        .astype('int')
+    good_rating_movies['vote_average'] = good_rating_movies['vote_average']\
+        .astype('int')
+    good_rating_movies['wr'] = good_rating_movies\
+        .apply(weighted_rating, axis=1)
+    good_rating_movies = good_rating_movies\
+        .sort_values('wr', ascending=False).head(10)
+    return good_rating_movies
+
+print(improved_recommendations_title_film('The Dark Knight'))
+
+
+#Collaborative Filtering
+reader = Reader()
+
+ratings = pd.read_csv('E:/Bsu/course42/Diploma/Kurs/ratings_small.csv')
+ratings.head()
+
+data = Dataset.load_from_df(ratings[['userId', 'movieId', 'rating']], reader)
+
+svd = SVD()
+cross_validate(svd, data, measures=['RMSE', 'MAE'], cv=5, verbose=True)
+#evaluate(svd, data, measures=['RMSE', 'MAE'])
+
+#trainset = data.build_full_trainset()
+#svd.train(trainset)
+
+print(ratings[ratings['userId'] == 1])
+print(svd.predict(1, 7648, 3))
+print(svd.predict(1, 303, 3))
+print(svd.predict(1, 5023, 3))
+
+def convert_int(x):
+     try:
+         return int(x)
+     except:
+         return np.nan
+
+
+id_map = pd.read_csv('E:/Bsu/course42/Diploma/Kurs/links_small.csv')[['movieId', 'tmdbId']]
+id_map['tmdbId'] = id_map['tmdbId'].apply(convert_int)
+id_map.columns = ['movieId', 'id']
+id_map = id_map.merge(all_content_md[['title', 'id']], on='id').set_index('title')
+id_map = id_map.set_index('tmdbId')
+indices_map = id_map.set_index('id')
+#
+#
+def hybrid(userId, title):
+     idx = indices[title]
+     tmdbId = id_map.loc[title]['id']
+     print(idx)
+     movie_id = id_map.loc[title]['movieId']
+
+     sim_scores = list(enumerate(cosine_sim[int(idx)]))
+     sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+     sim_scores = sim_scores[1:26]
+     movie_indices = [i[0] for i in sim_scores]
+#
+     movies = all_content_md.iloc[movie_indices][['title', 'vote_count', 'vote_average', 'year', 'id']]
+     movies['est'] = movies['id'].apply(lambda x: svd.predict(userId, indices_map.loc[x]['movieId']).est)
+     movies = movies.sort_values('est', ascending=False)
+     return movies.head(10)
+
+#
+print(hybrid(1, 'The Dark Knight'))
+print("End")
